@@ -3049,16 +3049,24 @@ function TeleconsultationView({ appointmentId, user, onEndCall, initialMode }) {
   const iceQueueRef = useRef([]);
   const remoteDescSetRef = useRef(false);
 
+  const [localStream, setLocalStream] = useState(null);
   const [remoteStream, setRemoteStream] = useState(null);
+  const [remoteVideoOff, setRemoteVideoOff] = useState(false);
+  const [remoteAudioMuted, setRemoteAudioMuted] = useState(false);
   const [peers, setPeers] = useState([]);
   const [callEnded, setCallEnded] = useState(false);
   const remoteVideoRef = useRef(null);
   const localPipRef = useRef(null);
   const remoteAudioRef = useRef(null);
-  const iceConfig = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+  const iceConfig = {
+    iceServers: [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:stun1.l.google.com:19302' }
+    ]
+  };
 
   const [aptList, setAptList] = useState([]);
-  const [selectedId, setSelectedId] = useState(appointmentId || null);
+  const [selectedId, setSelectedId] = useState(appointmentId ? Number(appointmentId) : null);
   const [session, setSession] = useState(null);
   const [messages, setMessages] = useState([]);
   const [chatText, setChatText] = useState('');
@@ -3070,51 +3078,70 @@ function TeleconsultationView({ appointmentId, user, onEndCall, initialMode }) {
   const [callDuration, setCallDuration] = useState(0);
   const [panelTab, setPanelTab] = useState('chat'); // 'chat' | 'reports'
   const callTimerRef = useRef(null);
-  const videoRef = useRef(null);
 
-  // Duration timer
+  // Duration timer: active only after user has joined consultation
   useEffect(() => {
     if (mediaActive) {
-      callTimerRef.current = setInterval(() => setCallDuration(d => d + 1), 1000);
+      callTimerRef.current = setInterval(() => setCallDuration((d) => d + 1), 1000);
     } else {
       clearInterval(callTimerRef.current);
     }
     return () => clearInterval(callTimerRef.current);
   }, [mediaActive]);
 
-  const formatDuration = (s) => `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
+  const formatDuration = (s) =>
+    `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
 
-  // Fetch confirmed/completed appointments
+  // Fetch confirmed/active appointments for the authenticated user
   useEffect(() => {
     api.get('/appointments').then((res) => {
-      const activeOnes = res.data.filter((a) => ['Confirmed', 'In Progress', 'Waiting for Doctor', 'Waiting for Patient'].includes(a.status));
+      const activeOnes = res.data.filter((a) =>
+        ['Confirmed', 'In Progress', 'Waiting for Doctor', 'Waiting for Patient'].includes(a.status)
+      );
       setAptList(activeOnes);
       if (!selectedId && activeOnes.length > 0) {
         setSelectedId(activeOnes[0].id);
       }
-    });
+    }).catch((err) => console.error('Error fetching appointments:', err));
   }, []);
 
-  // Fetch session details when appointment selected
+  // Fetch session details and poll messages when appointment selected
   useEffect(() => {
     if (!selectedId) return;
     api.get(`/consultations/${selectedId}/session`)
       .then((res) => setSession(res.data))
-      .catch((err) => console.error(err));
+      .catch((err) => console.error('Error fetching session details:', err));
+
     const fetchMsgs = () => {
       api.get(`/consultations/${selectedId}/messages`)
         .then((res) => setMessages(res.data))
-        .catch((err) => console.error(err));
+        .catch((err) => console.error('Error fetching messages:', err));
     };
     fetchMsgs();
     const timer = setInterval(fetchMsgs, 3000);
     return () => clearInterval(timer);
   }, [selectedId]);
 
+  // Keep video srcObjects attached and in sync with state
+  useEffect(() => {
+    if (localPipRef.current && localStream) {
+      localPipRef.current.srcObject = localStream;
+    }
+  }, [localStream, mediaActive, isVideoOff]);
+
+  useEffect(() => {
+    if (remoteVideoRef.current && remoteStream) {
+      remoteVideoRef.current.srcObject = remoteStream;
+    }
+    if (remoteAudioRef.current && remoteStream) {
+      remoteAudioRef.current.srcObject = remoteStream;
+    }
+  }, [remoteStream, remoteVideoOff]);
+
   // Drain queued ICE candidates after remote desc is set
   const drainIceQueue = async () => {
     const pc = pcRef.current;
-    if (!pc || !remoteDescSetRef.current) return;
+    if (!pc || !remoteDescSetRef.current || !pc.remoteDescription) return;
     while (iceQueueRef.current.length > 0) {
       const candidate = iceQueueRef.current.shift();
       try {
@@ -3129,7 +3156,7 @@ function TeleconsultationView({ appointmentId, user, onEndCall, initialMode }) {
   const initiateOffer = async () => {
     const pc = pcRef.current;
     const ws = wsRef.current;
-    if (!pc || !ws) return;
+    if (!pc || !ws || ws.readyState !== WebSocket.OPEN) return;
     try {
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
@@ -3144,60 +3171,98 @@ function TeleconsultationView({ appointmentId, user, onEndCall, initialMode }) {
     const pc = pcRef.current;
     const ws = wsRef.current;
     if (!pc || !ws) return;
-    if (data.sdp) {
-      const desc = new RTCSessionDescription(data.sdp);
-      await pc.setRemoteDescription(desc);
-      remoteDescSetRef.current = true;
-      await drainIceQueue();
-      if (desc.type === 'offer') {
-        const answer = await pc.createAnswer();
-        await pc.setLocalDescription(answer);
-        ws.send(JSON.stringify({ type: 'signal', signalData: { sdp: pc.localDescription } }));
-      }
-    } else if (data.candidate) {
-      if (remoteDescSetRef.current) {
-        try {
-          await pc.addIceCandidate(new RTCIceCandidate(data.candidate));
-        } catch (e) {
-          console.warn('ICE candidate error', e);
+    try {
+      if (data.sdp) {
+        const desc = new RTCSessionDescription(data.sdp);
+        if (desc.type === 'offer') {
+          if (pc.signalingState !== 'stable') {
+            await Promise.all([
+              pc.setLocalDescription({ type: 'rollback' }).catch(() => {}),
+              pc.setRemoteDescription(desc)
+            ]);
+          } else {
+            await pc.setRemoteDescription(desc);
+          }
+          remoteDescSetRef.current = true;
+          await drainIceQueue();
+          const answer = await pc.createAnswer();
+          await pc.setLocalDescription(answer);
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'signal', signalData: { sdp: pc.localDescription } }));
+          }
+        } else if (desc.type === 'answer') {
+          if (pc.signalingState === 'have-local-offer') {
+            await pc.setRemoteDescription(desc);
+            remoteDescSetRef.current = true;
+            await drainIceQueue();
+          }
         }
-      } else {
-        iceQueueRef.current.push(data.candidate);
+      } else if (data.candidate) {
+        if (remoteDescSetRef.current && pc.remoteDescription) {
+          try {
+            await pc.addIceCandidate(new RTCIceCandidate(data.candidate));
+          } catch (e) {
+            console.warn('ICE candidate error', e);
+          }
+        } else {
+          iceQueueRef.current.push(data.candidate);
+        }
       }
+    } catch (err) {
+      console.warn('Error handling WebRTC signal:', err);
     }
   };
 
-  // Start camera/mic or audio-only
+  // Start camera/mic or audio-only ONLY when user clicks Join Call
   const startCamera = async () => {
+    if (!selectedId) return;
     setMediaError('');
     remoteDescSetRef.current = false;
     iceQueueRef.current = [];
 
-    let stream;
+    let stream = null;
     const isAudioOnly = callMode === 'audio';
+
     try {
       stream = await navigator.mediaDevices.getUserMedia(
-        isAudioOnly ? { audio: true, video: false } : { video: true, audio: true }
+        isAudioOnly
+          ? { audio: true, video: false }
+          : { video: { width: { ideal: 1280 }, height: { ideal: 720 } }, audio: true }
       );
     } catch (err) {
-      // Fallback to audio-only if video fails
-      try {
-        stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-        setCallMode('audio');
-        setMediaError('Camera not accessible – switched to audio-only mode.');
-      } catch (err2) {
-        setMediaError('Microphone not accessible. Consultation running in chat-only mode.');
+      console.warn('getUserMedia error:', err);
+      if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+        setMediaError('Camera / Microphone permission was denied. Please allow camera and microphone access in your browser settings to join.');
+        return;
+      }
+      if (!isAudioOnly) {
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+          setCallMode('audio');
+          setMediaError('Camera not available or could not be opened. Switched to voice-only consultation mode.');
+        } catch (err2) {
+          if (err2.name === 'NotAllowedError' || err2.name === 'PermissionDeniedError') {
+            setMediaError('Microphone permission was denied. Please allow microphone access in your browser settings.');
+          } else {
+            setMediaError('Neither camera nor microphone could be accessed on this device. Consultation running in chat-only mode.');
+          }
+          return;
+        }
+      } else {
+        setMediaError('Microphone not accessible. Please check your audio input device.');
         return;
       }
     }
 
     localStreamRef.current = stream;
+    setLocalStream(stream);
 
-    // Attach local stream to local pip and main video refs
-    if (localPipRef.current) localPipRef.current.srcObject = stream;
-    if (videoRef.current) videoRef.current.srcObject = stream;
+    // Attach local stream ONLY to local picture-in-picture preview
+    if (localPipRef.current) {
+      localPipRef.current.srcObject = stream;
+    }
 
-    // Create peer connection
+    // Create WebRTC peer connection
     const pc = new RTCPeerConnection(iceConfig);
     pcRef.current = pc;
 
@@ -3205,10 +3270,10 @@ function TeleconsultationView({ appointmentId, user, onEndCall, initialMode }) {
 
     pc.addEventListener('track', (event) => {
       const [remote] = event.streams;
-      setRemoteStream(remote);
-      if (remoteVideoRef.current) remoteVideoRef.current.srcObject = remote;
-      if (remoteAudioRef.current && !remoteVideoRef.current?.srcObject) {
-        remoteAudioRef.current.srcObject = remote;
+      if (remote) {
+        setRemoteStream(remote);
+        if (remoteVideoRef.current) remoteVideoRef.current.srcObject = remote;
+        if (remoteAudioRef.current) remoteAudioRef.current.srcObject = remote;
       }
     });
 
@@ -3225,82 +3290,191 @@ function TeleconsultationView({ appointmentId, user, onEndCall, initialMode }) {
       }
     });
 
-    // Setup WebSocket signaling
+    // Helper: determine if this user initiates the offer (Doctor or health worker first)
+    const shouldInitiate = (myRole, currentPeers) => {
+      if (myRole === 'DOCTOR') return true;
+      if (myRole === 'ADMIN') return true;
+      const hasDoctor = currentPeers.some((p) => p.role === 'DOCTOR');
+      if (!hasDoctor && myRole === 'HEALTH_WORKER') return true;
+      return false;
+    };
+
+    // Setup WebSocket signaling with JWT token & user identity
+    const token = localStorage.getItem('token') || '';
     const socket = new WebSocket(`ws://${window.location.hostname}:5000/ws`);
     wsRef.current = socket;
 
     socket.addEventListener('open', () => {
-      socket.send(JSON.stringify({ type: 'join', roomId: selectedId, user: { id: user.id, name: user.name, role: user.role } }));
+      socket.send(
+        JSON.stringify({
+          type: 'join',
+          roomId: selectedId,
+          user: { id: user.id, name: user.name, role: user.role },
+          token
+        })
+      );
     });
 
     socket.addEventListener('message', async (event) => {
-      const msg = JSON.parse(event.data);
-      switch (msg.type) {
-        case 'room-info':
-          setPeers(msg.peers);
-          if (msg.peers.length > 0) await initiateOffer();
-          break;
-        case 'peer-joined':
-          setPeers((p) => [...p, msg.peer]);
-          if (user.role === 'DOCTOR') await initiateOffer();
-          break;
-        case 'signal':
-          await handleSignal(msg.signalData);
-          break;
-        case 'peer-left':
-          setPeers((p) => p.filter((pr) => pr.id !== msg.peer.id));
-          break;
-        case 'call-ended':
-          setCallEnded(true);
-          break;
-        default:
-          break;
+      try {
+        const msg = JSON.parse(event.data);
+        switch (msg.type) {
+          case 'error':
+            setMediaError(msg.message || 'Error connecting to consultation room.');
+            break;
+          case 'room-info':
+            setPeers(msg.peers || []);
+            if (msg.peers && msg.peers.length > 0 && shouldInitiate(user.role, msg.peers)) {
+              await initiateOffer();
+            }
+            break;
+          case 'peer-joined':
+            setPeers((p) => [...p.filter((pr) => pr.id !== msg.peer.id), msg.peer]);
+            if (shouldInitiate(user.role, [msg.peer])) {
+              await initiateOffer();
+            }
+            break;
+          case 'signal':
+            await handleSignal(msg.signalData);
+            break;
+          case 'media-toggle':
+            if (msg.mediaType === 'video') {
+              setRemoteVideoOff(!msg.enabled);
+            } else if (msg.mediaType === 'audio') {
+              setRemoteAudioMuted(!msg.enabled);
+            }
+            break;
+          case 'peer-left':
+            setPeers((p) => p.filter((pr) => pr.id !== msg.peer?.id));
+            setRemoteStream(null);
+            if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null;
+            break;
+          case 'call-ended':
+            setCallEnded(true);
+            stopCamera();
+            break;
+          default:
+            break;
+        }
+      } catch (e) {
+        console.warn('Signaling parse error', e);
       }
     });
 
-    // Mark as waiting
-    if (selectedId) {
-      const statusToSet = user.role === 'DOCTOR' ? 'Waiting for Patient' : 'Waiting for Doctor';
-      api.put(`/appointments/${selectedId}/meeting`, { meeting_status: statusToSet }).catch(() => {});
-    }
+    // Mark meeting status
+    const statusToSet = user.role === 'DOCTOR' ? 'Waiting for Patient' : 'Waiting for Doctor';
+    api.put(`/appointments/${selectedId}/meeting`, { meeting_status: statusToSet }).catch(() => {});
 
     setMediaActive(true);
+    setCallEnded(false);
     setCallDuration(0);
   };
 
+  // Stop camera, microphone, WebSocket, and WebRTC peer connection completely
   const stopCamera = () => {
+    // 1. Close WebSocket
+    if (wsRef.current) {
+      try {
+        if (wsRef.current.readyState === WebSocket.OPEN) {
+          wsRef.current.close();
+        }
+      } catch (e) {}
+      wsRef.current = null;
+    }
+
+    // 2. Stop and release all local media tracks
     if (localStreamRef.current) {
-      localStreamRef.current.getTracks().forEach((t) => t.stop());
+      localStreamRef.current.getTracks().forEach((t) => {
+        try {
+          t.stop();
+        } catch (e) {}
+      });
       localStreamRef.current = null;
     }
+    setLocalStream(null);
+
+    // 3. Close RTCPeerConnection
     if (pcRef.current) {
-      pcRef.current.close();
+      try {
+        pcRef.current.close();
+      } catch (e) {}
       pcRef.current = null;
     }
+
+    // 4. Detach video srcObjects
+    if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null;
+    if (localPipRef.current) localPipRef.current.srcObject = null;
+    if (remoteAudioRef.current) remoteAudioRef.current.srcObject = null;
+
+    setRemoteStream(null);
+    setPeers([]);
     setMediaActive(false);
+    setIsMuted(false);
+    setIsVideoOff(false);
+    setRemoteVideoOff(false);
+    setRemoteAudioMuted(false);
+    remoteDescSetRef.current = false;
+    iceQueueRef.current = [];
   };
 
+  // Clean up media and connections on unmount or session switch
   useEffect(() => {
-    if (selectedId) startCamera();
-    return () => { stopCamera(); };
+    return () => {
+      stopCamera();
+    };
   }, [selectedId]);
 
+  // Switch consultation session cleanly
+  const handleSwitchSession = (newId) => {
+    if (!newId || newId === selectedId) return;
+    stopCamera();
+    setSelectedId(Number(newId) || newId);
+    setCallEnded(false);
+    setMediaError('');
+  };
+
+  // Toggle user's own microphone
   const toggleMute = () => {
     if (localStreamRef.current) {
-      const audioTrack = localStreamRef.current.getAudioTracks()[0];
-      if (audioTrack) {
-        audioTrack.enabled = !audioTrack.enabled;
-        setIsMuted(!audioTrack.enabled);
+      const audioTracks = localStreamRef.current.getAudioTracks();
+      if (audioTracks.length > 0) {
+        const nextState = !audioTracks[0].enabled;
+        audioTracks.forEach((t) => {
+          t.enabled = nextState;
+        });
+        setIsMuted(!nextState);
+        if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+          wsRef.current.send(
+            JSON.stringify({
+              type: 'media-toggle',
+              mediaType: 'audio',
+              enabled: nextState
+            })
+          );
+        }
       }
     }
   };
 
+  // Toggle user's own camera
   const toggleVideo = () => {
     if (localStreamRef.current) {
-      const videoTrack = localStreamRef.current.getVideoTracks()[0];
-      if (videoTrack) {
-        videoTrack.enabled = !videoTrack.enabled;
-        setIsVideoOff(!videoTrack.enabled);
+      const videoTracks = localStreamRef.current.getVideoTracks();
+      if (videoTracks.length > 0) {
+        const nextState = !videoTracks[0].enabled;
+        videoTracks.forEach((t) => {
+          t.enabled = nextState;
+        });
+        setIsVideoOff(!nextState);
+        if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+          wsRef.current.send(
+            JSON.stringify({
+              type: 'media-toggle',
+              mediaType: 'video',
+              enabled: nextState
+            })
+          );
+        }
       }
     }
   };
@@ -3308,8 +3482,10 @@ function TeleconsultationView({ appointmentId, user, onEndCall, initialMode }) {
   const handleEndCall = async () => {
     const ws = wsRef.current;
     if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: 'call-ended' }));
-      ws.close();
+      try {
+        ws.send(JSON.stringify({ type: 'call-ended' }));
+        ws.close();
+      } catch (e) {}
     }
     wsRef.current = null;
     stopCamera();
@@ -3346,20 +3522,33 @@ function TeleconsultationView({ appointmentId, user, onEndCall, initialMode }) {
     );
   }
 
+  // Room title according to role
+  const roomTitle =
+    user.role === 'DOCTOR'
+      ? 'Doctor Teleconsultation Room'
+      : user.role === 'PATIENT'
+      ? 'Patient Teleconsultation Room'
+      : 'Teleconsultation Room';
+
+  const roomSubtitle =
+    user.role === 'DOCTOR'
+      ? 'Live clinical examination, patient remote video, prescription notes & diagnostic records'
+      : 'Secure live video & audio consultation with your verified consulting doctor';
+
   return (
     <div>
       <div className="page-header">
         <div>
-          <h2 className="page-title">Live Teleconsultation Room</h2>
-          <p className="page-subtitle">Real-time clinical audio, video, and prescription communication</p>
+          <h2 className="page-title">{roomTitle}</h2>
+          <p className="page-subtitle">{roomSubtitle}</p>
         </div>
         <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
           <label style={{ fontSize: '0.85rem', fontWeight: 600 }}>Switch Session:</label>
           <select
             className="form-select"
             style={{ width: 'auto' }}
-            value={selectedId}
-            onChange={(e) => setSelectedId(e.target.value)}
+            value={selectedId || ''}
+            onChange={(e) => handleSwitchSession(e.target.value)}
           >
             {aptList.map((a) => (
               <option key={a.id} value={a.id}>
@@ -3380,126 +3569,273 @@ function TeleconsultationView({ appointmentId, user, onEndCall, initialMode }) {
       <div className="teleconsult-container">
         {/* Video feed column */}
         <div className="video-screen">
-            {/* Hidden audio for remote audio-only track */}
-            <audio ref={remoteAudioRef} autoPlay playsInline style={{ display: 'none' }} />
+          {/* Hidden audio for remote audio tracks */}
+          <audio ref={remoteAudioRef} autoPlay playsInline style={{ display: 'none' }} />
 
-            {/* Audio-only call screen */}
-            {callMode === 'audio' && mediaActive && (
-              <div className="audio-call-screen">
-                <div style={{ textAlign: 'center' }}>
-                  <div style={{ width: 80, height: 80, borderRadius: '50%', background: 'rgba(255,255,255,0.15)', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 16px auto', border: '3px solid rgba(255,255,255,0.4)' }}>
-                    <PhoneCall size={36} color="#fff" />
-                  </div>
-                  <h3 style={{ color: '#fff', fontSize: '1.2rem', marginBottom: 8 }}>
-                    {session ? (user.role === 'DOCTOR' ? session.patient_name : session.doctor_name) : 'Voice Consultation'}
-                  </h3>
-                  <div style={{ color: '#94a3b8', fontSize: '0.9rem', marginBottom: 20 }}>
-                    {peers.length > 0 ? '🟢 Connected' : '⏳ Waiting for other participant...'}
-                  </div>
-                  <div style={{ fontSize: '1.5rem', fontWeight: 800, color: '#38bdf8', fontFamily: 'monospace' }}>
-                    {formatDuration(callDuration)}
-                  </div>
+          {/* STATE 1: Call Lobby (User has NOT joined yet - camera and microphone are completely OFF) */}
+          {!mediaActive && !callEnded && (
+            <div className="teleconsult-lobby">
+              <div className="lobby-content">
+                <div className="lobby-icon">
+                  {callMode === 'audio' ? <PhoneCall size={44} /> : <Video size={44} />}
+                </div>
+                <h3 style={{ color: '#fff', fontSize: '1.25rem', marginTop: 12, marginBottom: 6 }}>
+                  {user.role === 'DOCTOR' ? 'Doctor Teleconsultation Room' : 'Patient Teleconsultation Room'}
+                </h3>
+                <div style={{ color: '#94a3b8', fontSize: '0.9rem', marginBottom: 16 }}>
+                  {session ? (
+                    <>
+                      Consultation with <b>{user.role === 'DOCTOR' ? session.patient_name : session.doctor_name}</b>
+                      <div style={{ fontSize: '0.82rem', opacity: 0.85, marginTop: 4 }}>
+                        Session #{session.id} • {session.date?.slice(0, 10)} at {session.time?.slice(0, 5)} • {session.reason || 'General Consultation'}
+                      </div>
+                    </>
+                  ) : (
+                    'Select an appointment session to join.'
+                  )}
+                </div>
+
+                <div style={{ display: 'flex', gap: 10, justifyContent: 'center', marginBottom: 18 }}>
+                  <button
+                    type="button"
+                    className={`btn btn-sm ${callMode === 'video' ? 'btn-primary' : 'btn-outline'}`}
+                    onClick={() => setCallMode('video')}
+                  >
+                    <Video size={16} /> Video Call
+                  </button>
+                  <button
+                    type="button"
+                    className={`btn btn-sm ${callMode === 'audio' ? 'btn-primary' : 'btn-outline'}`}
+                    onClick={() => setCallMode('audio')}
+                  >
+                    <PhoneCall size={16} /> Voice Only
+                  </button>
+                </div>
+
+                <div>
+                  <button
+                    type="button"
+                    className="btn btn-success btn-lg"
+                    style={{ padding: '12px 28px', fontSize: '1rem', fontWeight: 700, borderRadius: 24 }}
+                    onClick={startCamera}
+                    disabled={!selectedId}
+                  >
+                    <Video size={20} /> Join Call
+                  </button>
+                </div>
+
+                <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, marginTop: 18, fontSize: '0.78rem', color: '#64748b' }}>
+                  <ShieldCheck size={16} color="#22c55e" />
+                  <span>Camera & microphone remain off until you click <b>Join Call</b>.</span>
                 </div>
               </div>
-            )}
-
-            {/* Video mode elements */}
-            {callMode !== 'audio' && (
-              <>
-                <video ref={remoteVideoRef} autoPlay playsInline className="video-feed" style={{ display: remoteStream ? 'block' : 'none' }} />
-                <video ref={videoRef} autoPlay muted playsInline className="video-feed" style={{ display: remoteStream ? 'none' : mediaActive && !isVideoOff ? 'block' : 'none' }} />
-                <div className="local-pip-container" style={{ display: mediaActive && !isVideoOff ? 'flex' : 'none' }}>
-                  <video ref={localPipRef} className="local-pip-video" muted playsInline autoPlay />
-                  <div className="local-pip-badge">
-                    {isVideoOff ? 'Camera off' : 'Live'}
-                    <span>{isMuted ? 'Muted' : 'Audio'} </span>
-                  </div>
-                </div>
-              </>
-            )}
-
-            {/* Waiting overlay when no peers and video mode */}
-            {callMode !== 'audio' && peers.length === 0 && (
-              <div className="waiting-peer-container">
-                <h3>Waiting for participant to join...</h3>
-                <div className="pulse-dot pulse-blue" />
-              </div>
-            )}
-            {/* Call ended overlay */}
-            {callEnded && (
-              <div className="call-ended-overlay">
-                <h2>Consultation Ended</h2>
-                <p>Thank you for using MediConnect AI Teleconsultation.</p>
-                <button className="btn btn-primary" onClick={() => window.location.reload()}>Return to Dashboard</button>
-              </div>
-            )}
-
-          {callMode !== 'audio' && (!mediaActive || isVideoOff) && (
-            <div
-              style={{
-                position: 'absolute',
-                top: 0,
-                left: 0,
-                right: 0,
-                bottom: 0,
-                display: 'flex',
-                flexDirection: 'column',
-                alignItems: 'center',
-                justifyContent: 'center',
-                color: '#fff',
-                background: '#1e293b'
-              }}
-            >
-              <User size={64} style={{ opacity: 0.5, marginBottom: 12 }} />
-              <h4>{session ? (user.role === 'DOCTOR' ? session.patient_name : session.doctor_name) : 'Medical Session'}</h4>
-              <p style={{ fontSize: '0.82rem', color: '#94a3b8', marginTop: 4 }}>
-                {isVideoOff ? 'Camera turned off' : 'Audio & in-call consultation active'}
-              </p>
             </div>
           )}
 
+          {/* STATE 2: Video Mode when media is active */}
+          {mediaActive && callMode !== 'audio' && (
+            <>
+              {/* Main Video Area: Displays ONLY the Remote Participant's stream */}
+              {remoteStream ? (
+                <>
+                  <video
+                    ref={remoteVideoRef}
+                    autoPlay
+                    playsInline
+                    className="video-feed"
+                    style={{ display: remoteVideoOff ? 'none' : 'block' }}
+                  />
+                  {remoteVideoOff && (
+                    <div className="remote-video-off-screen">
+                      <User size={64} style={{ opacity: 0.5, marginBottom: 12 }} />
+                      <h4 style={{ color: '#fff' }}>
+                        {user.role === 'DOCTOR' ? session?.patient_name : session?.doctor_name}
+                      </h4>
+                      <p style={{ color: '#94a3b8', fontSize: '0.85rem' }}>Camera turned off (Audio active)</p>
+                    </div>
+                  )}
+                  <div className="remote-peer-label">
+                    <span>
+                      {user.role === 'DOCTOR'
+                        ? `Patient: ${session?.patient_name || 'Patient'}`
+                        : `Doctor: ${session?.doctor_name || 'Doctor'}`}
+                    </span>
+                    {remoteAudioMuted && <span style={{ color: '#ef4444', marginLeft: 8 }}>🔇 Muted</span>}
+                  </div>
+                </>
+              ) : (
+                /* Main Area: Displays "Waiting for participant to join..." when remote user hasn't joined */
+                <div className="waiting-peer-container">
+                  <div className="waiting-icon-pulse">
+                    <User size={48} color="#38bdf8" />
+                  </div>
+                  <h3 style={{ marginTop: 16, fontSize: '1.25rem', color: '#fff' }}>
+                    Waiting for participant to join...
+                  </h3>
+                  <p style={{ color: '#94a3b8', fontSize: '0.88rem', maxWidth: 380, marginTop: 6 }}>
+                    {user.role === 'DOCTOR'
+                      ? `Waiting for patient ${session?.patient_name || ''} to connect to this consultation session.`
+                      : `Waiting for Dr. ${session?.doctor_name || ''} to connect to this consultation session.`}
+                  </p>
+                  <div
+                    style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: 8,
+                      marginTop: 14,
+                      background: 'rgba(255,255,255,0.08)',
+                      padding: '6px 14px',
+                      borderRadius: 20
+                    }}
+                  >
+                    <div className="pulse-dot pulse-blue" />
+                    <span style={{ fontSize: '0.8rem', color: '#e2e8f0' }}>Room #{selectedId} Active</span>
+                  </div>
+                  <p style={{ fontSize: '0.78rem', color: '#64748b', marginTop: 12 }}>
+                    Your local camera preview is active in the bottom right corner.
+                  </p>
+                </div>
+              )}
+
+              {/* Picture-in-Picture Preview: Displays ONLY Current User's Local Camera */}
+              <div className="local-pip-container">
+                {!isVideoOff ? (
+                  <video ref={localPipRef} className="local-pip-video" muted playsInline autoPlay />
+                ) : (
+                  <div className="local-pip-off">
+                    <VideoOff size={22} color="#94a3b8" />
+                    <span>Camera off</span>
+                  </div>
+                )}
+                <div className="local-pip-badge">
+                  <span>{user.role === 'DOCTOR' ? 'Doctor (You)' : 'Patient (You)'}</span>
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                    {isVideoOff ? 'Off' : 'Live'}
+                    {isMuted ? '🔇' : '🎤'}
+                  </span>
+                </div>
+              </div>
+            </>
+          )}
+
+          {/* STATE 3: Audio-only Call Screen */}
+          {mediaActive && callMode === 'audio' && (
+            <div className="audio-call-screen">
+              <div style={{ textAlign: 'center' }}>
+                <div
+                  style={{
+                    width: 80,
+                    height: 80,
+                    borderRadius: '50%',
+                    background: 'rgba(255,255,255,0.15)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    margin: '0 auto 16px auto',
+                    border: '3px solid rgba(255,255,255,0.4)'
+                  }}
+                >
+                  <PhoneCall size={36} color="#fff" />
+                </div>
+                <h3 style={{ color: '#fff', fontSize: '1.2rem', marginBottom: 8 }}>
+                  {session ? (user.role === 'DOCTOR' ? session.patient_name : session.doctor_name) : 'Voice Consultation'}
+                </h3>
+                <div style={{ color: '#94a3b8', fontSize: '0.9rem', marginBottom: 20 }}>
+                  {remoteStream || peers.length > 0 ? '🟢 Connected' : '⏳ Waiting for participant to join...'}
+                </div>
+                <div style={{ fontSize: '1.5rem', fontWeight: 800, color: '#38bdf8', fontFamily: 'monospace' }}>
+                  {formatDuration(callDuration)}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Call Ended Overlay */}
+          {callEnded && (
+            <div className="call-ended-overlay">
+              <h2>Consultation Ended</h2>
+              <p>Thank you for using MediConnect AI Teleconsultation.</p>
+              <div style={{ display: 'flex', gap: 10, marginTop: 16 }}>
+                <button type="button" className="btn btn-outline" onClick={() => setCallEnded(false)}>
+                  Rejoin Room
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  onClick={() => (onEndCall ? onEndCall() : window.location.reload())}
+                >
+                  Return to Dashboard
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Top Video Overlay Info */}
           <div className="video-overlay-info">
             <div>
               <b style={{ fontSize: '1rem' }}>
                 {session ? `${session.doctor_name} ↔ ${session.patient_name}` : 'Consultation'}
               </b>
               <div style={{ fontSize: '0.78rem', opacity: 0.85 }}>
-                {session ? `${session.date.slice(0, 10)} at ${session.time.slice(0, 5)}` : ''}
-                {mediaActive && <span style={{ marginLeft: 12, color: '#38bdf8', fontFamily: 'monospace', fontWeight: 700 }}> ⏱ {formatDuration(callDuration)}</span>}
+                {session ? `${session.date?.slice(0, 10)} at ${session.time?.slice(0, 5)}` : ''}
+                {mediaActive && (
+                  <span style={{ marginLeft: 12, color: '#38bdf8', fontFamily: 'monospace', fontWeight: 700 }}>
+                    {' '}
+                    ⏱ {formatDuration(callDuration)}
+                  </span>
+                )}
               </div>
             </div>
             <div className="video-status-indicator">
-              <div className="pulse-dot" />
-              <span>{peers.length > 0 ? 'Connected' : 'Room Active'}</span>
+              <div className={`pulse-dot ${remoteStream ? '' : 'pulse-blue'}`} />
+              <span>{remoteStream ? 'Connected' : mediaActive ? 'Waiting for Peer' : 'Not Joined'}</span>
             </div>
           </div>
 
+          {/* Bottom Video Controls Bar */}
           <div className="video-controls">
-            <button
-              className={`control-btn ${isMuted ? 'muted' : 'active'}`}
-              onClick={toggleMute}
-              title={isMuted ? 'Unmute Mic' : 'Mute Mic'}
-            >
-              {isMuted ? <MicOff size={20} /> : <Mic size={20} />}
-            </button>
+            {mediaActive ? (
+              <>
+                <button
+                  type="button"
+                  className={`control-btn ${isMuted ? 'muted' : 'active'}`}
+                  onClick={toggleMute}
+                  title={isMuted ? 'Unmute Mic' : 'Mute Mic'}
+                >
+                  {isMuted ? <MicOff size={20} /> : <Mic size={20} />}
+                </button>
 
-            {callMode !== 'audio' && (
+                {callMode !== 'audio' && (
+                  <button
+                    type="button"
+                    className={`control-btn ${isVideoOff ? 'muted' : 'active'}`}
+                    onClick={toggleVideo}
+                    title={isVideoOff ? 'Turn Video On' : 'Turn Video Off'}
+                  >
+                    {isVideoOff ? <VideoOff size={20} /> : <Video size={20} />}
+                  </button>
+                )}
+
+                <button
+                  type="button"
+                  className="control-btn end"
+                  onClick={handleEndCall}
+                  title="End Consultation"
+                >
+                  <PhoneOff size={20} />
+                </button>
+              </>
+            ) : (
               <button
-                className={`control-btn ${isVideoOff ? 'muted' : 'active'}`}
-                onClick={toggleVideo}
-                title={isVideoOff ? 'Turn Video On' : 'Turn Video Off'}
+                type="button"
+                className="btn btn-success btn-sm"
+                style={{ padding: '8px 20px', fontWeight: 700, borderRadius: 20 }}
+                onClick={startCamera}
+                disabled={!selectedId}
               >
-                {isVideoOff ? <VideoOff size={20} /> : <Video size={20} />}
+                <Video size={16} /> Join Call
               </button>
             )}
-
-            <button
-              className="control-btn end"
-              onClick={handleEndCall}
-              title="End Consultation"
-            >
-              <PhoneOff size={20} />
-            </button>
           </div>
         </div>
 

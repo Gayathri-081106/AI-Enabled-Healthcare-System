@@ -1,8 +1,8 @@
 import http from 'http';
 import { WebSocket } from 'ws';
 
-const BASE = 'http://127.0.0.1:5000/api';
-const WS_BASE = 'ws://127.0.0.1:5000/ws';
+const BASE = 'http://localhost:5000/api';
+const WS_BASE = 'ws://localhost:5000/ws';
 
 async function req(endpoint, method = 'GET', data = null, token = null) {
   const url = `${BASE}${endpoint}`;
@@ -63,7 +63,7 @@ async function runComprehensiveTests() {
   const newPatientData = {
     name: `Ramesh Community ${randNum}`,
     email: `ramesh.${randNum}@village.org`,
-    password: 'password123',
+    password: 'Password@123',
     phone: `98421${randNum}`,
     dob: '1988-06-15',
     gender: 'Male',
@@ -171,27 +171,29 @@ async function runComprehensiveTests() {
     let answerExchanged = false;
     let iceExchanged = false;
 
-    // Doctor WebSocket
-    const docWs = new WebSocket(`${WS_BASE}?token=${doctorAuth.token}`);
-
     req('/auth/login', 'POST', { email: newPatientData.email, password: 'Password@123' }).then(ptLogin => {
+      const docWs = new WebSocket(`${WS_BASE}?token=${doctorAuth.token}`);
       const patWs = new WebSocket(`${WS_BASE}?token=${ptLogin.token}`);
 
-      docWs.on('open', () => {
+      const sendDocJoin = () => {
         docWs.send(JSON.stringify({
           type: 'join',
           roomId: String(appointmentId),
           user: { id: doctorAuth.user.id, name: doctorAuth.user.name, role: doctorAuth.user.role }
         }));
-      });
+      };
+      if (docWs.readyState === WebSocket.OPEN) sendDocJoin();
+      else docWs.on('open', sendDocJoin);
 
-      patWs.on('open', () => {
+      const sendPatJoin = () => {
         patWs.send(JSON.stringify({
           type: 'join',
           roomId: String(appointmentId),
-          user: { id: patientId, name: newPatientData.name, role: 'PATIENT' }
+          user: { id: ptLogin.user.id, name: ptLogin.user.name, role: 'PATIENT' }
         }));
-      });
+      };
+      if (patWs.readyState === WebSocket.OPEN) sendPatJoin();
+      else patWs.on('open', sendPatJoin);
 
       docWs.on('message', (msg) => {
         const data = JSON.parse(msg.toString());

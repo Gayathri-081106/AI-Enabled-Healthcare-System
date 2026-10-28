@@ -31,15 +31,64 @@ wss.on('connection', (ws) => {
     ws.isAlive = true;
   });
 
-  ws.on('message', (raw) => {
+  ws.on('message', async (raw) => {
     try {
       const msg = JSON.parse(raw);
       switch (msg.type) {
         case 'join': {
-          const { roomId, user } = msg;
+          const { roomId, user, token } = msg;
           if (!roomId || !user) return;
-          currentRoomId = String(roomId);
-          currentUser = user;
+          const targetRoomId = String(roomId);
+
+          let verifiedUser = user;
+          if (token) {
+            try {
+              const decoded = jwt.verify(token, process.env.JWT_SECRET || 'mediconnect_ai_jwt_secret_key_2026_secure');
+              if (decoded) verifiedUser = decoded;
+            } catch (err) {
+              console.warn('WebSocket token verification note:', err.message);
+            }
+          }
+
+          // Authorize consultation room access
+          try {
+            const hasAccess = await checkConsultationAccess(verifiedUser, targetRoomId);
+            if (!hasAccess) {
+              ws.send(JSON.stringify({
+                type: 'error',
+                message: 'Unauthorized: You are not assigned to this consultation session.'
+              }));
+              return;
+            }
+          } catch (authErr) {
+            console.error('Room authorization check failed:', authErr.message);
+            ws.send(JSON.stringify({
+              type: 'error',
+              message: 'Failed to verify consultation room access.'
+            }));
+            return;
+          }
+
+          // If this connection was already joined to a different room, clean up previous room first
+          if (currentRoomId && currentRoomId !== targetRoomId && consultationRooms.has(currentRoomId)) {
+            const oldRoom = consultationRooms.get(currentRoomId);
+            oldRoom.delete(ws);
+            if (oldRoom.size === 0) {
+              consultationRooms.delete(currentRoomId);
+            } else {
+              oldRoom.forEach((peer, peerWs) => {
+                if (peerWs.readyState === WebSocket.OPEN) {
+                  peerWs.send(JSON.stringify({
+                    type: 'peer-left',
+                    peer: currentUser ? { id: currentUser.id, name: currentUser.name, role: currentUser.role } : null
+                  }));
+                }
+              });
+            }
+          }
+
+          currentRoomId = targetRoomId;
+          currentUser = verifiedUser;
 
           if (!consultationRooms.has(currentRoomId)) {
             consultationRooms.set(currentRoomId, new Map());
@@ -51,13 +100,13 @@ wss.on('connection', (ws) => {
             if (peerWs !== ws && peerWs.readyState === WebSocket.OPEN) {
               peerWs.send(JSON.stringify({
                 type: 'peer-joined',
-                peer: { id: user.id, name: user.name, role: user.role }
+                peer: { id: verifiedUser.id, name: verifiedUser.name, role: verifiedUser.role }
               }));
             }
           });
 
           // Register this peer
-          room.set(ws, { id: user.id, name: user.name, role: user.role });
+          room.set(ws, { id: verifiedUser.id, name: verifiedUser.name, role: verifiedUser.role });
 
           // Send current peers to the newly joined user
           const existingPeers = [];
@@ -84,6 +133,22 @@ wss.on('connection', (ws) => {
                 type: 'signal',
                 sender: currentUser ? { id: currentUser.id, name: currentUser.name, role: currentUser.role } : null,
                 signalData: msg.signalData
+              }));
+            }
+          });
+          break;
+        }
+
+        case 'media-toggle': {
+          if (!currentRoomId || !consultationRooms.has(currentRoomId)) return;
+          const room = consultationRooms.get(currentRoomId);
+          room.forEach((peer, peerWs) => {
+            if (peerWs !== ws && peerWs.readyState === WebSocket.OPEN) {
+              peerWs.send(JSON.stringify({
+                type: 'media-toggle',
+                sender: currentUser ? { id: currentUser.id, name: currentUser.name, role: currentUser.role } : null,
+                mediaType: msg.mediaType,
+                enabled: msg.enabled
               }));
             }
           });
@@ -165,6 +230,37 @@ wss.on('close', () => {
 const q = async (sql, params = []) => {
   const [rows] = await db.query(sql, params);
   return rows;
+};
+
+// Check consultation access permissions across roles (Patient, Doctor, Health Worker, Admin)
+const checkConsultationAccess = async (user, appointmentId) => {
+  if (!user || !appointmentId) return null;
+  const rows = await q(
+    `SELECT a.id, a.patient_id, a.doctor_id, d.user_id doc_uid, a.status, a.date, a.time, a.meeting_status
+     FROM appointments a
+     JOIN doctors d ON d.id = a.doctor_id
+     WHERE a.id = ?`,
+    [appointmentId]
+  );
+  if (rows.length === 0) return null;
+  const apt = rows[0];
+
+  if (user.role === 'ADMIN') return apt;
+  if (user.role === 'PATIENT' && apt.patient_id === user.id) return apt;
+  if (user.role === 'DOCTOR' && apt.doc_uid === user.id) return apt;
+
+  // Check health worker assignment
+  if (user.role === 'HEALTH_WORKER') {
+    const hwAssigned = await q(
+      `SELECT 1 FROM health_worker_patients hwp
+       JOIN health_workers hw ON hw.id = hwp.health_worker_id
+       WHERE hw.user_id = ? AND hwp.patient_id = ?`,
+      [user.id, apt.patient_id]
+    );
+    if (hwAssigned.length > 0) return apt;
+  }
+
+  return null;
 };
 
 // Async route wrapper with error handling
@@ -879,35 +975,7 @@ app.put('/api/appointments/:id/meeting', auth('PATIENT', 'DOCTOR', 'HEALTH_WORKE
 // ==========================================
 // 4. TELECONSULTATION & IN-CALL MESSAGES
 // ==========================================
-
-const checkConsultationAccess = async (user, appointmentId) => {
-  const rows = await q(
-    `SELECT a.id, a.patient_id, a.doctor_id, d.user_id doc_uid, a.status, a.date, a.time, a.meeting_status
-     FROM appointments a
-     JOIN doctors d ON d.id = a.doctor_id
-     WHERE a.id = ?`,
-    [appointmentId]
-  );
-  if (rows.length === 0) return null;
-  const apt = rows[0];
-
-  if (user.role === 'ADMIN') return apt;
-  if (user.role === 'PATIENT' && apt.patient_id === user.id) return apt;
-  if (user.role === 'DOCTOR' && apt.doc_uid === user.id) return apt;
-
-  // Check health worker assignment
-  if (user.role === 'HEALTH_WORKER') {
-    const hwAssigned = await q(
-      `SELECT 1 FROM health_worker_patients hwp
-       JOIN health_workers hw ON hw.id = hwp.health_worker_id
-       WHERE hw.user_id = ? AND hwp.patient_id = ?`,
-      [user.id, apt.patient_id]
-    );
-    if (hwAssigned.length > 0) return apt;
-  }
-
-  return null;
-};
+// Note: checkConsultationAccess defined above for WebSocket & REST authorization
 
 // Get consultation room details
 app.get('/api/consultations/:id/session', auth(), wrap(async (req, res) => {
