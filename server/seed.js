@@ -7,7 +7,7 @@ import db from './db.js';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-async function initAndSeed() {
+export async function initAndSeed() {
   console.log('🔄 Initializing MediConnect AI Database...');
 
   // 1. Read schema.sql and execute
@@ -456,10 +456,19 @@ async function initAndSeed() {
   console.log('📋 Health Workers: hw1@demo.com (Sarala), hw2@demo.com (Malathi)');
   console.log('🧑 Patients:        patient1@demo.com to patient5@demo.com');
   console.log('----------------------------------------------------');
-  process.exit(0);
+  return true;
 }
 
-initAndSeed().catch(err => {
-  console.error('❌ Error during init and seed:', err);
-  process.exit(1);
-});
+const isDirectRun = process.argv[1] && (
+  process.argv[1].endsWith('seed.js') ||
+  process.argv[1].endsWith('seed')
+);
+
+if (isDirectRun) {
+  initAndSeed()
+    .then(() => process.exit(0))
+    .catch(err => {
+      console.error('❌ Error during init and seed:', err);
+      process.exit(1);
+    });
+}

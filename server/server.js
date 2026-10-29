@@ -3552,6 +3552,25 @@ if (fs.existsSync(clientDistPath)) {
   });
 }
 
+// Auto-verify and safely initialize database schema if empty on first deployment
+async function autoInitDb() {
+  try {
+    const [tables] = await db.query("SHOW TABLES LIKE 'users'");
+    if (!tables || tables.length === 0) {
+      console.log('🔄 First-time deployment detected: initializing database schema and seed data...');
+      const { initAndSeed } = await import('./seed.js');
+      await initAndSeed();
+      console.log('✅ Database auto-initialization completed successfully!');
+    } else {
+      console.log('✅ Database connection verified and schema already present.');
+    }
+  } catch (err) {
+    console.warn('⚠️ Note during database verification:', err.message);
+  }
+}
+
+autoInitDb();
+
 const PORT = process.env.PORT || 5000;
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 MediConnect AI Server & Teleconsultation WebSocket running on port ${PORT} (bound to 0.0.0.0)`);
