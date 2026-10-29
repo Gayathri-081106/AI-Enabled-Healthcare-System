@@ -1,15 +1,15 @@
 import mysql from 'mysql2/promise';
 import 'dotenv/config';
 
-// Build connection configuration supporting individual env vars, Railway/Zeabur variables, and connection strings
+// Build connection configuration supporting individual env vars, Clever Cloud, Railway/Zeabur variables, and connection strings
 function createDbPool() {
-  const connectionUrl = process.env.DATABASE_URL || process.env.MYSQL_URL || process.env.MYSQL_URI || process.env.ZEABUR_MYSQL_URL;
+  const connectionUrl = process.env.DATABASE_URL || process.env.MYSQL_URL || process.env.MYSQL_URI || process.env.ZEABUR_MYSQL_URL || process.env.MYSQL_ADDON_URI;
 
-  const host = process.env.DB_HOST || process.env.MYSQLHOST || process.env.MYSQL_HOST || 'localhost';
-  const port = (process.env.DB_PORT || process.env.MYSQLPORT || process.env.MYSQL_PORT) ? parseInt(process.env.DB_PORT || process.env.MYSQLPORT || process.env.MYSQL_PORT, 10) : 3306;
-  const user = process.env.DB_USER || process.env.MYSQLUSER || process.env.MYSQL_USER || process.env.MYSQL_USERNAME || 'root';
-  const password = process.env.DB_PASSWORD !== undefined ? process.env.DB_PASSWORD : (process.env.MYSQLPASSWORD || process.env.MYSQL_PASSWORD || '');
-  const database = process.env.DB_NAME || process.env.MYSQLDATABASE || process.env.MYSQL_DATABASE || 'healthcare_portal';
+  const host = process.env.DB_HOST || process.env.MYSQLHOST || process.env.MYSQL_HOST || process.env.MYSQL_ADDON_HOST || 'localhost';
+  const port = (process.env.DB_PORT || process.env.MYSQLPORT || process.env.MYSQL_PORT || process.env.MYSQL_ADDON_PORT) ? parseInt(process.env.DB_PORT || process.env.MYSQLPORT || process.env.MYSQL_PORT || process.env.MYSQL_ADDON_PORT, 10) : 3306;
+  const user = process.env.DB_USER || process.env.MYSQLUSER || process.env.MYSQL_USER || process.env.MYSQL_USERNAME || process.env.MYSQL_ADDON_USER || 'root';
+  const password = process.env.DB_PASSWORD !== undefined ? process.env.DB_PASSWORD : (process.env.MYSQLPASSWORD || process.env.MYSQL_PASSWORD || process.env.MYSQL_ADDON_PASSWORD || '');
+  const database = process.env.DB_NAME || process.env.MYSQLDATABASE || process.env.MYSQL_DATABASE || process.env.MYSQL_ADDON_DB || 'healthcare_portal';
 
   // Cloud hosted MySQL databases typically require SSL, except private internal networks (e.g. railway.internal, zeabur.internal)
   const isInternalNetwork = (host && (host.includes('railway.internal') || host.includes('zeabur.internal'))) || 
