@@ -1,18 +1,19 @@
 import mysql from 'mysql2/promise';
 import 'dotenv/config';
 
-// Build connection configuration supporting individual env vars, Railway variables, and connection strings
+// Build connection configuration supporting individual env vars, Railway/Zeabur variables, and connection strings
 function createDbPool() {
-  const connectionUrl = process.env.DATABASE_URL || process.env.MYSQL_URL;
+  const connectionUrl = process.env.DATABASE_URL || process.env.MYSQL_URL || process.env.MYSQL_URI || process.env.ZEABUR_MYSQL_URL;
 
-  const host = process.env.DB_HOST || process.env.MYSQLHOST || 'localhost';
-  const port = process.env.DB_PORT || process.env.MYSQLPORT ? parseInt(process.env.DB_PORT || process.env.MYSQLPORT, 10) : 3306;
-  const user = process.env.DB_USER || process.env.MYSQLUSER || 'root';
-  const password = process.env.DB_PASSWORD !== undefined ? process.env.DB_PASSWORD : (process.env.MYSQLPASSWORD || '');
-  const database = process.env.DB_NAME || process.env.MYSQLDATABASE || 'healthcare_portal';
+  const host = process.env.DB_HOST || process.env.MYSQLHOST || process.env.MYSQL_HOST || 'localhost';
+  const port = (process.env.DB_PORT || process.env.MYSQLPORT || process.env.MYSQL_PORT) ? parseInt(process.env.DB_PORT || process.env.MYSQLPORT || process.env.MYSQL_PORT, 10) : 3306;
+  const user = process.env.DB_USER || process.env.MYSQLUSER || process.env.MYSQL_USER || process.env.MYSQL_USERNAME || 'root';
+  const password = process.env.DB_PASSWORD !== undefined ? process.env.DB_PASSWORD : (process.env.MYSQLPASSWORD || process.env.MYSQL_PASSWORD || '');
+  const database = process.env.DB_NAME || process.env.MYSQLDATABASE || process.env.MYSQL_DATABASE || 'healthcare_portal';
 
-  // Cloud hosted MySQL databases typically require SSL, except private internal networks (e.g. railway.internal)
-  const isInternalNetwork = (host && host.includes('railway.internal')) || (connectionUrl && connectionUrl.includes('railway.internal'));
+  // Cloud hosted MySQL databases typically require SSL, except private internal networks (e.g. railway.internal, zeabur.internal)
+  const isInternalNetwork = (host && (host.includes('railway.internal') || host.includes('zeabur.internal'))) || 
+                           (connectionUrl && (connectionUrl.includes('railway.internal') || connectionUrl.includes('zeabur.internal')));
   const isRemote = ((host !== 'localhost' && host !== '127.0.0.1') || !!connectionUrl) && !isInternalNetwork;
   const useSsl = process.env.DB_SSL === 'true' || (isRemote && process.env.DB_SSL !== 'false');
 
