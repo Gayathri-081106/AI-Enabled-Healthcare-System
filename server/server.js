@@ -3,6 +3,7 @@ import os from 'os';
 import path from 'path';
 import crypto from 'crypto';
 import fs from 'fs';
+import { fileURLToPath } from 'url';
 import { WebSocketServer, WebSocket } from 'ws';
 import express from 'express';
 import cors from 'cors';
@@ -11,6 +12,10 @@ import jwt from 'jsonwebtoken';
 import 'dotenv/config';
 import multer from 'multer';
 import db from './db.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
 
 const app = express();
 app.use(cors({ origin: true, credentials: true }));
@@ -3053,7 +3058,7 @@ app.delete('/api/admin/users/:id', auth('ADMIN'), wrap(async (req, res) => {
 // 11. MEDICAL REPORT UPLOAD & SHARING APIS
 // ==========================================
 
-const reportsStorageDir = path.join(process.cwd(), 'uploads', 'medical_reports');
+const reportsStorageDir = path.join(__dirname, 'uploads', 'medical_reports');
 if (!fs.existsSync(reportsStorageDir)) {
   fs.mkdirSync(reportsStorageDir, { recursive: true });
 }
@@ -3513,13 +3518,43 @@ app.get('/api/consultations/:appointmentId/reports', auth(), wrap(async (req, re
   res.json([]);
 }));
 
-// Health check endpoint
-app.get('/api/health', (req, res) => {
-  res.json({ status: 'healthy', timestamp: new Date().toISOString() });
+// Health check endpoints for cloud load balancers and deployment monitoring
+app.get(['/health', '/api/health'], (req, res) => {
+  res.json({
+    status: 'healthy',
+    timestamp: new Date().toISOString(),
+    service: 'MediConnect AI Healthcare API',
+    uptime: process.uptime()
+  });
 });
 
+// Production static file serving & SPA fallback
+const clientDistPath = path.join(__dirname, '../client/dist');
+if (fs.existsSync(clientDistPath)) {
+  console.log(`📦 Serving compiled frontend from ${clientDistPath}`);
+  app.use(express.static(clientDistPath));
+
+  app.get('*', (req, res, next) => {
+    if (req.path.startsWith('/api') || req.path.startsWith('/ws')) {
+      return next();
+    }
+    res.sendFile(path.join(clientDistPath, 'index.html'));
+  });
+} else {
+  // Helpful root response if frontend is hosted on a separate static platform
+  app.get('/', (req, res) => {
+    res.json({
+      name: 'MediConnect AI Healthcare API',
+      status: 'online',
+      health: '/api/health',
+      timestamp: new Date().toISOString()
+    });
+  });
+}
+
 const PORT = process.env.PORT || 5000;
-server.listen(PORT, () => {
-  console.log(`🚀 MediConnect AI Server & Teleconsultation WebSocket running on port ${PORT}`);
+server.listen(PORT, '0.0.0.0', () => {
+  console.log(`🚀 MediConnect AI Server & Teleconsultation WebSocket running on port ${PORT} (bound to 0.0.0.0)`);
 });
+
 

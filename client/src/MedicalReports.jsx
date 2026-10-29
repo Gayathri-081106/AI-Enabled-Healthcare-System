@@ -27,9 +27,11 @@ import {
   ExternalLink
 } from 'lucide-react';
 
-const apiBase = typeof window !== 'undefined' && window.location.hostname && window.location.hostname !== 'localhost'
-  ? `http://${window.location.hostname}:5000/api`
-  : 'http://localhost:5000/api';
+const apiBase = import.meta.env.VITE_API_BASE_URL
+  ? import.meta.env.VITE_API_BASE_URL.replace(/\/+$/, '')
+  : (typeof window !== 'undefined' && window.location.hostname && window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1'
+      ? `${window.location.origin}/api`
+      : 'http://localhost:5000/api');
 
 const api = axios.create({ baseURL: apiBase });
 api.interceptors.request.use((config) => {

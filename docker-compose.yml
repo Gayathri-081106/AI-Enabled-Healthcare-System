@@ -1,0 +1,43 @@
+version: '3.8'
+
+services:
+  db:
+    image: mysql:8.0
+    container_name: mediconnect-mysql
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: root_production_secure_pass
+      MYSQL_DATABASE: healthcare_portal
+      MYSQL_USER: mediconnect_user
+      MYSQL_PASSWORD: mediconnect_secure_password
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./database/schema.sql:/docker-entrypoint-initdb.d/schema.sql
+
+  app:
+    build: .
+    container_name: mediconnect-app
+    restart: always
+    depends_on:
+      - db
+    ports:
+      - "5000:5000"
+    environment:
+      PORT: 5000
+      NODE_ENV: production
+      DB_HOST: db
+      DB_PORT: 3306
+      DB_USER: mediconnect_user
+      DB_PASSWORD: mediconnect_secure_password
+      DB_NAME: healthcare_portal
+      JWT_SECRET: mediconnect_ai_jwt_secret_key_2026_secure
+      UPI_PAYEE_ID:
+      UPI_PAYEE_NAME: MediConnect AI
+    volumes:
+      - reports_storage:/app/server/uploads/medical_reports
+
+volumes:
+  mysql_data:
+  reports_storage:

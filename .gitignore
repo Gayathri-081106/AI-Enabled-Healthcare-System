@@ -1,8 +1,30 @@
 node_modules/
 client/node_modules/
 server/node_modules/
+
+# Environment files
 .env
 .env.*
 !.env.example
+client/.env
+client/.env.*
+!client/.env.example
+server/.env
+server/.env.*
+!server/.env.example
+
+# Build artifacts
 dist/
 build/
+client/dist/
+
+# Uploaded medical reports and patient files (protect patient privacy)
+server/uploads/*
+!server/uploads/.gitkeep
+server/uploads/medical_reports/*
+!server/uploads/medical_reports/.gitkeep
+
+# System & Editor files
+.DS_Store
+Thumbs.db
+*.log

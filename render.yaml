@@ -1,0 +1,33 @@
+services:
+  - type: web
+    name: mediconnect-ai
+    env: node
+    plan: free
+    region: oregon
+    buildCommand: npm run build
+    startCommand: npm start
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 10000
+      - key: JWT_SECRET
+        generateValue: true
+      - key: DB_HOST
+        sync: false
+      - key: DB_PORT
+        value: 3306
+      - key: DB_USER
+        sync: false
+      - key: DB_PASSWORD
+        sync: false
+      - key: DB_NAME
+        value: healthcare_portal
+      - key: DB_SSL
+        value: true
+      - key: UPI_PAYEE_NAME
+        value: MediConnect AI
+      - key: UPI_PAYEE_ID
+        sync: false

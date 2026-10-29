@@ -1205,7 +1205,12 @@ export function LanguageProvider({ children, currentUser }) {
       localStorage.setItem(`user_${u.id}_lang`, newLang);
     }
     if (token) {
-      fetch('http://localhost:5000/api/auth/language', {
+      const apiBase = import.meta.env.VITE_API_BASE_URL
+        ? import.meta.env.VITE_API_BASE_URL.replace(/\/+$/, '')
+        : (typeof window !== 'undefined' && window.location.hostname && window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1'
+            ? `${window.location.origin}/api`
+            : 'http://localhost:5000/api');
+      fetch(`${apiBase}/auth/language`, {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',

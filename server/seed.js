@@ -25,6 +25,18 @@ async function initAndSeed() {
     .filter(s => s.length > 0);
 
   for (const statement of statements) {
+    // On hosted cloud databases (Aiven, TiDB, PlanetScale, Railway), CREATE DATABASE or USE statements may be restricted
+    const upper = statement.trim().toUpperCase();
+    if (upper.startsWith('CREATE DATABASE') || upper.startsWith('USE ')) {
+      try {
+        await db.query(statement);
+      } catch (err) {
+        // Safe to ignore on hosted databases where the database name is pre-allocated
+        console.log(`ℹ️ Database initialization notice (${statement.slice(0, 30)}...): ${err.message}`);
+      }
+      continue;
+    }
+
     try {
       await db.query(statement);
     } catch (err) {
@@ -385,6 +397,56 @@ async function initAndSeed() {
     [p1, 'Your appointment with Dr. Priya Sharma has been confirmed for tomorrow at 10:30 AM.']);
   await db.query('INSERT INTO notifications (user_id, message) VALUES (?, ?)',
     [p1, 'Medicine Reminder: Please take Paracetamol 500mg after breakfast.']);
+
+  // 15. Sample Medical Reports & Report Sharing (Safe synthetic demo data)
+  const reportsDir = path.join(__dirname, 'uploads', 'medical_reports');
+  if (!fs.existsSync(reportsDir)) {
+    fs.mkdirSync(reportsDir, { recursive: true });
+  }
+
+  const sampleFileName = 'demo_blood_test_report.pdf';
+  const sampleFilePath = path.join(reportsDir, sampleFileName);
+  if (!fs.existsSync(sampleFilePath)) {
+    // Generate a minimal valid PDF demo artifact
+    const dummyPdfContent = `%PDF-1.4\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R >>\nendobj\n4 0 obj\n<< /Length 75 >>\nstream\nBT /F1 14 Tf 50 700 Td (MediConnect AI - Synthetic Demo Medical Report) Tj ET\nendstream\nendobj\nxref\n0 5\n0000000000 65535 f \n0000000009 00000 n \n0000000058 00000 n \n0000000115 00000 n \n0000000206 00000 n \ntrailer\n<< /Size 5 /Root 1 0 R >>\nstartxref\n332\n%%EOF`;
+    fs.writeFileSync(sampleFilePath, dummyPdfContent);
+  }
+
+  const [existingReports] = await db.query('SELECT id FROM medical_reports WHERE patient_id = ?', [p1]);
+  if (existingReports.length === 0) {
+    const [insertedRep] = await db.query(`
+      INSERT INTO medical_reports 
+      (patient_id, title, category, description, report_date, original_file_name, stored_file_name, file_path, file_type, file_size, uploaded_by_user_id, allow_health_worker_access)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `, [
+      p1,
+      'Complete Blood Count (CBC) & Lipid Profile',
+      'Blood Test',
+      'Routine fasting blood work showing normal hemoglobin and slight elevated LDL cholesterol.',
+      today,
+      'CBC_Lipid_Report.pdf',
+      sampleFileName,
+      sampleFilePath,
+      'application/pdf',
+      350,
+      p1,
+      true
+    ]);
+
+    const reportId = insertedRep.insertId;
+
+    // Share report with Dr. Priya Sharma
+    await db.query(`
+      INSERT IGNORE INTO medical_report_shares (report_id, shared_with_doctor_id, shared_by_user_id, notes)
+      VALUES (?, ?, ?, ?)
+    `, [reportId, docPriya, p1, 'Shared for upcoming cardiology appointment']);
+
+    // Doctor clinical note
+    await db.query(`
+      INSERT INTO medical_report_clinical_notes (report_id, doctor_id, notes)
+      VALUES (?, ?, ?)
+    `, [reportId, docPriya, 'Lipid profile reviewed. LDL borderline 132 mg/dL. Recommended dietary adjustments and 30 mins cardio daily.']);
+  }
 
   console.log('🎉 Seeding successfully completed!');
   console.log('----------------------------------------------------');

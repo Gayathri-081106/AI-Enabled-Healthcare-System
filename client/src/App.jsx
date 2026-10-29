@@ -62,10 +62,43 @@ import {
   UploadMedicalReportModal
 } from './MedicalReports.jsx';
 
-const apiBase = typeof window !== 'undefined' && window.location.hostname && window.location.hostname !== 'localhost'
-  ? `http://${window.location.hostname}:5000/api`
-  : 'http://localhost:5000/api';
+export const getApiBaseUrl = () => {
+  if (import.meta.env.VITE_API_BASE_URL) {
+    return import.meta.env.VITE_API_BASE_URL.replace(/\/+$/, '');
+  }
+  if (typeof window !== 'undefined') {
+    if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
+      return 'http://localhost:5000/api';
+    }
+    return `${window.location.origin}/api`;
+  }
+  return 'http://localhost:5000/api';
+};
+
+export const getWebSocketUrl = () => {
+  if (import.meta.env.VITE_WS_URL) {
+    return import.meta.env.VITE_WS_URL;
+  }
+  if (import.meta.env.VITE_API_BASE_URL) {
+    try {
+      const parsed = new URL(import.meta.env.VITE_API_BASE_URL, window.location.href);
+      const wsProto = parsed.protocol === 'https:' ? 'wss:' : 'ws:';
+      return `${wsProto}//${parsed.host}/ws`;
+    } catch (e) {}
+  }
+  if (typeof window !== 'undefined') {
+    const wsProto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
+      return `${wsProto}//${window.location.hostname}:5000/ws`;
+    }
+    return `${wsProto}//${window.location.host}/ws`;
+  }
+  return 'ws://localhost:5000/ws';
+};
+
+const apiBase = getApiBaseUrl();
 const api = axios.create({ baseURL: apiBase });
+
 
 api.interceptors.request.use((config) => {
   const token = localStorage.getItem('token');
@@ -2711,7 +2744,7 @@ function ConsultationPaymentQR({ appointmentId, session, user, patientName, doct
               </span>
             </div>
             <div className="payment-scan-instruction" style={{ fontWeight: 700, color: '#0f172a' }}>
-              Scan using Google Pay
+              Scan using Google Pay • Scan to view payment details
             </div>
             <div className="payment-qr-subtext" title={`${upiConfig.upiPayeeName} (${upiConfig.upiPayeeId})`}>
               Payee: {upiConfig.upiPayeeName} ({upiConfig.upiPayeeId})
@@ -3059,10 +3092,19 @@ function TeleconsultationView({ appointmentId, user, onEndCall, initialMode }) {
   const localPipRef = useRef(null);
   const remoteAudioRef = useRef(null);
   const iceConfig = {
-    iceServers: [
-      { urls: 'stun:stun.l.google.com:19302' },
-      { urls: 'stun:stun1.l.google.com:19302' }
-    ]
+    iceServers: (() => {
+      if (import.meta.env.VITE_ICE_SERVERS) {
+        try {
+          return JSON.parse(import.meta.env.VITE_ICE_SERVERS);
+        } catch (e) {
+          console.warn('Failed to parse VITE_ICE_SERVERS JSON, using default STUN');
+        }
+      }
+      return [
+        { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'stun:stun1.l.google.com:19302' }
+      ];
+    })()
   };
 
   const [aptList, setAptList] = useState([]);
@@ -3301,7 +3343,7 @@ function TeleconsultationView({ appointmentId, user, onEndCall, initialMode }) {
 
     // Setup WebSocket signaling with JWT token & user identity
     const token = localStorage.getItem('token') || '';
-    const socket = new WebSocket(`ws://${window.location.hostname}:5000/ws`);
+    const socket = new WebSocket(getWebSocketUrl());
     wsRef.current = socket;
 
     socket.addEventListener('open', () => {

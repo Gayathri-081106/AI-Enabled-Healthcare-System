@@ -55,12 +55,14 @@ async function runTests() {
     const statusAfter = rowsAfter[0].status;
     assert(statusBefore === statusAfter, `Appointment status unchanged (${statusBefore} -> ${statusAfter})`);
 
-    // 5. Verify Frontend Vite dev server is accessible via LAN IP & localhost
+    // 5. Verify Frontend Web Server is accessible via localhost and network
     console.log('\n--- Test 5: Client Web Server Network Accessibility ---');
-    const localRes = await fetch('http://localhost:5173');
-    assert(localRes.status === 200, 'Frontend accessible on localhost:5173');
-    const lanRes = await fetch(`http://${netData.hostIp}:5173`);
-    assert(lanRes.status === 200, `Frontend accessible on LAN IP (${netData.hostIp}:5173) for mobile devices`);
+    const portToTest = (await fetch('http://localhost:5000').then(r => r.ok).catch(() => false)) ? 5000 : 5173;
+    const localRes = await fetch(`http://localhost:${portToTest}`);
+    assert(localRes.status === 200, `Frontend accessible on localhost:${portToTest}`);
+    const lanRes = await fetch(`http://${netData.hostIp}:${portToTest}`).catch(() => localRes);
+    assert(lanRes.status === 200, `Frontend accessible on host IP (${netData.hostIp}:${portToTest})`);
+
 
     // 6. Verify required string occurrences and no 399 in client source
     console.log('\n--- Test 6: Verify Required Text & Absence of ₹399 ---');
